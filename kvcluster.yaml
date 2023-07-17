@@ -1,0 +1,103 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: 
+  name: kvcluster
+spec:
+  replicas: 9
+  selector:
+    matchLabels:
+      app: kvcluster
+  serviceName: kvcluster
+  template:
+    metadata:
+      labels:
+        app: kvcluster
+    spec:
+      initContainers:
+        - name: setup-env
+          image: nats:2.9.19-alpine3.18
+          command: ["sh", "-c"]
+          args:
+            - |
+              index=$(echo $HOSTNAME | awk -F "-" '{print $NF}');
+              shardNumber=$((index / 3));
+              clusterName=shard-$shardNumber;
+              serverName=$HOSTNAME;
+              cluster="nats://localhost:6222";
+              start=$((shardNumber * 3));
+              end=$((start + 2));
+              routes="";
+              for i in $(seq $start $end); do 
+                routes="$routes,nats://kvcluster-$i.kvcluster.$POD_NAMESPACE.svc.cluster.local:6222"; 
+              done;
+              routes=$(echo $routes | sed 's/^,//');
+              
+              echo "INDEX=$index" >> /data/env.properties;
+              echo "SHARD_NUMBER=$shardNumber" >> /data/env.properties;
+              echo "CLUSTER_NAME=$clusterName" >> /data/env.properties;
+              echo "SERVER_NAME=$serverName" >> /data/env.properties;
+              echo "CLUSTER=$cluster" >> /data/env.properties;
+              echo "ROUTES=$routes" >> /data/env.properties;
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+                  
+      containers:
+        - name: kvinstance
+          image: nats:2.9.19-alpine3.18
+          command: ["sh", "-c"]
+          args:
+            - |
+              source /data/env.properties;
+              echo "Cluster Name": $CLUSTER_NAME;
+              echo "Cluster: $CLUSTER";
+              echo "Routes: $ROUTES";
+              
+              exec nats-server -p 4222 -js -sd /data --server_name $SERVER_NAME --cluster_name $CLUSTER_NAME --cluster $CLUSTER --routes $ROUTES;
+                
+          ports:
+            - containerPort: 4222
+              name: client
+            - containerPort: 6222
+              name: cluster
+            - containerPort: 8222
+              name: monitoring
+              
+          volumeMounts:
+            - name: data
+              mountPath: /data
+              
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 10Gi
+            
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kvcluster
+  labels:
+    app: kvcluster
+spec:
+  clusterIP: None
+  ports:
+    - port: 4222
+      name: client
+    - port: 6222
+      name: cluster
+    - port: 8222
+      name: monitoring
+      
+  selector:
+    app: kvcluster
